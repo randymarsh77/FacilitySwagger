@@ -56,7 +56,7 @@ public class SwaggerSchema : ISwaggerSchema
 
 	public IList<SwaggerSchema>? AllOf { get; set; } // schema
 
-	public SwaggerSchema? AdditionalProperties { get; set; } // schema
+	public object? AdditionalProperties { get; set; } // schema - can be bool or SwaggerSchema
 
 	public string? Discriminator { get; set; } // schema
 

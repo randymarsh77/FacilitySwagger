@@ -1,7 +1,6 @@
 using System.Collections;
 using System.Globalization;
 using Facility.Definition.CodeGen;
-using Facility.Definition.Fsd;
 using Facility.Definition.Http;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -12,46 +11,25 @@ using YamlDotNet.Serialization.EventEmitters;
 namespace Facility.Definition.Swagger;
 
 /// <summary>
-/// Generates a Swagger (OpenAPI) 2.0 file for a service definition.
+/// Generates an OpenAPI 3.0 file for a service definition.
 /// </summary>
-public sealed class SwaggerGenerator : CodeGenerator
+public sealed class OpenApiGenerator : CodeGenerator
 {
-	/// <summary>
-	/// Generates Swagger.
-	/// </summary>
-	/// <param name="settings">The settings.</param>
-	/// <returns>The number of updated files.</returns>
-	public static int GenerateSwagger(SwaggerGeneratorSettings settings) =>
-		FileGenerator.GenerateFiles(
-			new SwaggerParser { ServiceName = settings.ServiceName },
-			new SwaggerGenerator { GeneratorName = nameof(SwaggerGenerator) },
-			settings);
-
-	/// <summary>
-	/// True to generate a Facility Service Definition (instead of Swagger).
-	/// </summary>
-	public bool GeneratesFsd { get; set; }
-
 	/// <summary>
 	/// True to generate JSON (instead of YAML).
 	/// </summary>
 	public bool GeneratesJson { get; set; }
 
 	/// <summary>
-	/// True to generate OpenAPI 3.0 (instead of Swagger 2.0).
+	/// Generates OpenAPI 3.0 for a service definition.
 	/// </summary>
-	public bool GeneratesOpenApi3 { get; set; }
-
-	/// <summary>
-	/// Generates Swagger (OpenAPI 2.0) for a service definition.
-	/// </summary>
-	public SwaggerService GenerateSwaggerService(ServiceInfo service)
+	public OpenApiDocument GenerateOpenApiDocument(ServiceInfo service)
 	{
 		var httpServiceInfo = HttpServiceInfo.Create(service);
 
-		var swaggerService = new SwaggerService
+		var openApiDocument = new OpenApiDocument
 		{
-			Swagger = SwaggerUtility.SwaggerVersion,
+			OpenApi = OpenApiUtility.OpenApiVersion,
 			Info = new SwaggerInfo
 			{
 				Identifier = service.Name,
@@ -65,19 +43,19 @@ public sealed class SwaggerGenerator : CodeGenerator
 		var defaultBaseUri = httpServiceInfo.Url;
 		if (defaultBaseUri != null)
 		{
-			var baseUri = new Uri(defaultBaseUri);
-			swaggerService.Host = baseUri.Host;
-			swaggerService.Schemes = [baseUri.Scheme];
-
-			string basePath = baseUri.PathAndQuery;
-			if (!string.IsNullOrEmpty(basePath) && basePath != "/")
-				swaggerService.BasePath = baseUri.PathAndQuery;
+			openApiDocument.Servers =
+			[
+				new OpenApiServer
+				{
+					Url = defaultBaseUri,
+				},
+			];
 		}
 
 		var paths = new OurDictionary<string, SwaggerOperations>();
 		foreach (var httpMethodInfo in httpServiceInfo.Methods)
 			AddMethodToPaths(paths, service, httpMethodInfo);
-		swaggerService.Paths = paths;
+		openApiDocument.Paths = paths;
 
 		var dtoInfos = new OurDictionary<string, ServiceDtoInfo>();
 		foreach (var httpMethodInfo in httpServiceInfo.Methods)
@@ -105,57 +83,44 @@ public sealed class SwaggerGenerator : CodeGenerator
 				break;
 		}
 
-		var definitions = new OurDictionary<string, SwaggerSchema>();
+		var schemas = new OurDictionary<string, SwaggerSchema>();
 		foreach (var dtoInfo in dtoInfos.Values)
-			definitions[dtoInfo.Name] = GetDtoSchema(service, dtoInfo);
-		swaggerService.Definitions = definitions.Count == 0 ? null : definitions;
+			schemas[dtoInfo.Name] = GetDtoSchema(service, dtoInfo);
 
-		return swaggerService;
+		if (schemas.Count > 0)
+		{
+			openApiDocument.Components = new OpenApiComponents
+			{
+				Schemas = schemas,
+			};
+		}
+
+		return openApiDocument;
 	}
 
 	/// <summary>
-	/// Generates a Swagger (OpenAPI 2.0) file for a service definition.
+	/// Generates an OpenAPI 3.0 file for a service definition.
 	/// </summary>
 	public override CodeGenOutput GenerateOutput(ServiceInfo service)
 	{
-		if (GeneratesFsd)
-			return new FsdGenerator { GeneratorName = GeneratorName, IndentText = IndentText, NewLine = NewLine }.GenerateOutput(service);
-
-		if (GeneratesOpenApi3)
-		{
-			var openApiGenerator = new OpenApiGenerator { GeneratorName = GeneratorName, GeneratesJson = GeneratesJson };
-			return openApiGenerator.GenerateOutput(service);
-		}
-
-		var swaggerService = GenerateSwaggerService(service);
+		var openApiDocument = GenerateOpenApiDocument(service);
 
 		if (GeneratesJson)
 		{
 			return new CodeGenOutput(CreateFile($"{service.Name}.json", code =>
 			{
 				using var jsonTextWriter = new JsonTextWriter(code.TextWriter) { Formatting = Formatting.Indented, CloseOutput = false };
-				JsonSerializer.Create(SwaggerUtility.JsonSerializerSettings).Serialize(jsonTextWriter, swaggerService);
+				JsonSerializer.Create(OpenApiUtility.JsonSerializerSettings).Serialize(jsonTextWriter, openApiDocument);
 			}));
 		}
 		else
 		{
 			return new CodeGenOutput(CreateFile($"{service.Name}.yaml", code =>
 			{
-				var yamlObject = ConvertJTokenToObject(JToken.FromObject(swaggerService, JsonSerializer.Create(SwaggerUtility.JsonSerializerSettings)))!;
+				var yamlObject = ConvertJTokenToObject(JToken.FromObject(openApiDocument, JsonSerializer.Create(OpenApiUtility.JsonSerializerSettings)))!;
 				new SerializerBuilder().DisableAliases().WithEventEmitter(x => new OurEventEmitter(x)).Build().Serialize(code.TextWriter, yamlObject);
 			}));
 		}
-	}
-
-	/// <summary>
-	/// Applies generator-specific settings.
-	/// </summary>
-	public override void ApplySettings(FileGeneratorSettings settings)
-	{
-		var swaggerSettings = (SwaggerGeneratorSettings) settings;
-		GeneratesFsd = swaggerSettings.GeneratesFsd;
-		GeneratesJson = swaggerSettings.GeneratesJson;
-		GeneratesOpenApi3 = swaggerSettings.GeneratesOpenApi3;
 	}
 
 	/// <summary>
@@ -281,11 +246,6 @@ public sealed class SwaggerGenerator : CodeGenerator
 			Tags = methodInfo.TagNames.Count == 0 ? null : methodInfo.TagNames.ToList(),
 		};
 
-		if (httpMethodInfo.RequestNormalFields.Count != 0 || httpMethodInfo.RequestBodyField != null)
-			operation.Consumes = ["application/json"];
-		if (httpMethodInfo.ValidResponses.Any(x => (x.NormalFields != null && x.NormalFields.Count != 0) || (x.BodyField != null && service.GetFieldType(x.BodyField.ServiceField)!.Kind != ServiceTypeKind.Boolean)))
-			operation.Produces = ["application/json"];
-
 		var parameters = new List<SwaggerParameter>();
 
 		foreach (var httpPathInfo in httpMethodInfo.PathFields)
@@ -297,14 +257,19 @@ public sealed class SwaggerGenerator : CodeGenerator
 		foreach (var httpHeaderInfo in httpMethodInfo.RequestHeaderFields)
 			parameters.Add(CreateSwaggerParameter(service, httpHeaderInfo.ServiceField, SwaggerParameterKind.Header, httpHeaderInfo.Name));
 
-		var requestBodyFieldType = httpMethodInfo.RequestBodyField == null ? null : service.GetFieldType(httpMethodInfo.RequestBodyField.ServiceField);
-		if (requestBodyFieldType != null && requestBodyFieldType.Kind != ServiceTypeKind.Boolean)
-			parameters.Add(CreateSwaggerRequestBodyParameter(requestBodyFieldType, "request", httpMethodInfo.RequestBodyField!.ServiceField.Summary));
-		else if (httpMethodInfo.RequestNormalFields.Count != 0)
-			parameters.Add(CreateSwaggerRequestBodyParameter(TryCreateMethodRequestBodyType(httpMethodInfo)!, "request"));
-
 		if (parameters.Count != 0)
 			operation.Parameters = parameters;
+
+		// OpenAPI 3.0: Use requestBody instead of body parameter
+		var requestBodyFieldType = httpMethodInfo.RequestBodyField == null ? null : service.GetFieldType(httpMethodInfo.RequestBodyField.ServiceField);
+		if (requestBodyFieldType != null && requestBodyFieldType.Kind != ServiceTypeKind.Boolean)
+		{
+			operation.RequestBody = CreateOpenApiRequestBody(requestBodyFieldType, httpMethodInfo.RequestBodyField!.ServiceField.Summary);
+		}
+		else if (httpMethodInfo.RequestNormalFields.Count != 0)
+		{
+			operation.RequestBody = CreateOpenApiRequestBody(TryCreateMethodRequestBodyType(httpMethodInfo)!);
+		}
 
 		var responses = new OurDictionary<string, SwaggerResponse>();
 
@@ -315,11 +280,11 @@ public sealed class SwaggerGenerator : CodeGenerator
 			var bodyField = validResponse.BodyField;
 			var bodyFieldType = bodyField == null ? null : service.GetFieldType(bodyField.ServiceField);
 			if (bodyField != null)
-				responses[statusCodeString] = CreateSwaggerResponse(bodyFieldType, bodyField.ServiceField.Name, bodyField.ServiceField.Summary);
+				responses[statusCodeString] = CreateOpenApiResponse(bodyFieldType, bodyField.ServiceField.Name, bodyField.ServiceField.Summary);
 			else if (validResponse.NormalFields != null && validResponse.NormalFields.Count != 0)
-				responses[statusCodeString] = CreateSwaggerResponse(TryCreateMethodResponseBodyType(httpMethodInfo, validResponse));
+				responses[statusCodeString] = CreateOpenApiResponse(TryCreateMethodResponseBodyType(httpMethodInfo, validResponse));
 			else
-				responses[statusCodeString] = CreateSwaggerResponse();
+				responses[statusCodeString] = CreateOpenApiResponse();
 		}
 
 		operation.Responses = responses;
@@ -366,26 +331,42 @@ public sealed class SwaggerGenerator : CodeGenerator
 		return parameterObject;
 	}
 
-	private static SwaggerParameter CreateSwaggerRequestBodyParameter(ServiceTypeInfo type, string name, string? description = null)
+	private static OpenApiRequestBody CreateOpenApiRequestBody(ServiceTypeInfo type, string? description = null)
 	{
-		return new SwaggerParameter
+		return new OpenApiRequestBody
 		{
-			In = SwaggerParameterKind.Body,
-			Name = name,
 			Description = description,
 			Required = true,
-			Schema = GetTypeSchema<SwaggerSchema>(type),
+			Content = new Dictionary<string, OpenApiMediaType>
+			{
+				["application/json"] = new OpenApiMediaType
+				{
+					Schema = GetTypeSchema<SwaggerSchema>(type),
+				},
+			},
 		};
 	}
 
-	private static SwaggerResponse CreateSwaggerResponse(ServiceTypeInfo? type = null, string? identifier = null, string? description = null)
+	private static SwaggerResponse CreateOpenApiResponse(ServiceTypeInfo? type = null, string? identifier = null, string? description = null)
 	{
-		return new SwaggerResponse
+		var response = new SwaggerResponse
 		{
 			Description = description ?? "",
-			Schema = type != null && type.Kind != ServiceTypeKind.Boolean ? GetTypeSchema<SwaggerSchema>(type) : null,
 			Identifier = identifier,
 		};
+
+		if (type != null && type.Kind != ServiceTypeKind.Boolean)
+		{
+			response.Content = new Dictionary<string, OpenApiMediaType>
+			{
+				["application/json"] = new OpenApiMediaType
+				{
+					Schema = GetTypeSchema<SwaggerSchema>(type),
+				},
+			};
+		}
+
+		return response;
 	}
 
 	private static T GetTypeSchema<T>(ServiceTypeInfo type)
@@ -465,9 +446,10 @@ public sealed class SwaggerGenerator : CodeGenerator
 	private static T GetDtoSchemaRef<T>(ServiceDtoInfo dtoInfo)
 		where T : ISwaggerSchema, new()
 	{
+		// OpenAPI 3.0 uses #/components/schemas/ instead of #/definitions/
 		return new T
 		{
-			Ref = "#/definitions/" + dtoInfo.Name,
+			Ref = "#/components/schemas/" + dtoInfo.Name,
 		};
 	}
 
@@ -477,25 +459,27 @@ public sealed class SwaggerGenerator : CodeGenerator
 		return new T
 		{
 			Type = SwaggerSchemaType.String,
-			Enum = [.. enumInfo.Values.Select(x => (JToken) x.Name)],
+			Enum = enumInfo.Values.Select(x => (JToken) x.Name).ToList(),
 		};
 	}
 
 	private static T GetErrorSchemaRef<T>()
 		where T : ISwaggerSchema, new()
 	{
+		// OpenAPI 3.0 uses #/components/schemas/ instead of #/definitions/
 		return new T
 		{
-			Ref = "#/definitions/Error",
+			Ref = "#/components/schemas/Error",
 		};
 	}
 
 	private static T GetResultTypeRef<T>(ServiceTypeInfo type)
 		where T : ISwaggerSchema, new()
 	{
+		// OpenAPI 3.0 uses #/components/schemas/ instead of #/definitions/
 		return new T
 		{
-			Ref = "#/definitions/" + GetTypeAsDtoName(type),
+			Ref = "#/components/schemas/" + GetTypeAsDtoName(type),
 		};
 	}
 

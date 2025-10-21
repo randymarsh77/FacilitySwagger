@@ -18,6 +18,11 @@ public sealed class SwaggerGeneratorSettings : FileGeneratorSettings
 	public bool GeneratesJson { get; set; }
 
 	/// <summary>
+	/// Generates OpenAPI 3.0 (instead of Swagger 2.0).
+	/// </summary>
+	public bool GeneratesOpenApi3 { get; set; }
+
+	/// <summary>
 	/// Overrides the service name.
 	/// </summary>
 	public string? ServiceName { get; set; }

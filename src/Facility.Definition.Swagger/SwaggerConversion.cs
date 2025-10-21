@@ -72,6 +72,18 @@ internal sealed class SwaggerConversion
 
 		var members = new List<ServiceMemberInfo>();
 
+		// Add DTOs first so methods can avoid conflicting with them
+		foreach (var swaggerDefinition in m_swaggerService.Definitions.EmptyIfNull())
+		{
+			if ((swaggerDefinition.Value.Type ?? SwaggerSchemaType.Object) == SwaggerSchemaType.Object &&
+				!IsFacilityError(swaggerDefinition) &&
+				TryGetFacilityResultOfType(swaggerDefinition, position) == null)
+			{
+				AddServiceDto(members, swaggerDefinition.Key, swaggerDefinition.Value, context.CreatePart("definitions/" + swaggerDefinition.Key)!);
+			}
+		}
+
+		// Then add methods, checking against DTOs to avoid conflicts and skipping DTOs that match method request/response names
 		foreach (var swaggerPath in m_swaggerService.Paths.EmptyIfNull())
 		{
 			var swaggerOperations = swaggerPath.Value;
@@ -86,17 +98,10 @@ internal sealed class SwaggerConversion
 			AddServiceMethod(members, "PATCH", swaggerPath.Key, swaggerOperations.Patch, swaggerOperations.Parameters, operationsContext.CreateContext("patch"));
 		}
 
-		foreach (var swaggerDefinition in m_swaggerService.Definitions.EmptyIfNull())
-		{
-			if ((swaggerDefinition.Value.Type ?? SwaggerSchemaType.Object) == SwaggerSchemaType.Object &&
-				!members.OfType<ServiceMethodInfo>().Any(x => swaggerDefinition.Key.Equals(x.Name + "Request", StringComparison.OrdinalIgnoreCase)) &&
-				!members.OfType<ServiceMethodInfo>().Any(x => swaggerDefinition.Key.Equals(x.Name + "Response", StringComparison.OrdinalIgnoreCase)) &&
-				!IsFacilityError(swaggerDefinition) &&
-				TryGetFacilityResultOfType(swaggerDefinition, position) == null)
-			{
-				AddServiceDto(members, swaggerDefinition.Key, swaggerDefinition.Value, context.CreatePart("definitions/" + swaggerDefinition.Key)!);
-			}
-		}
+		// Remove DTOs that match method request/response names (these will be generated from the methods instead)
+		members.RemoveAll(m => m is ServiceDtoInfo dto &&
+			(members.OfType<ServiceMethodInfo>().Any(x => dto.Name.Equals(x.Name + "Request", StringComparison.OrdinalIgnoreCase)) ||
+			 members.OfType<ServiceMethodInfo>().Any(x => dto.Name.Equals(x.Name + "Response", StringComparison.OrdinalIgnoreCase))));
 
 		Service = new ServiceInfo(name: name ?? "Api", members: members, attributes: attributes,
 			summary: PrepareSummary(m_swaggerService.Info?.Title),
@@ -111,6 +116,13 @@ internal sealed class SwaggerConversion
 
 	private void AddServiceDto(List<ServiceMemberInfo> members, string name, SwaggerSchema schema, ServicePart part)
 	{
+		// Sanitize name to ensure it's valid
+		name = SanitizeName(name);
+
+		// Avoid conflicts with existing members (methods or other DTOs) by appending "Dto" if needed
+		while (members.Any(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+			name += "Dto";
+
 		var attributes = new List<ServiceAttributeInfo>();
 
 		if (schema.Obsolete.GetValueOrDefault())
@@ -167,6 +179,10 @@ internal sealed class SwaggerConversion
 		if (!ServiceDefinitionUtility.IsValidName(name))
 			name = CodeGenUtility.ToCamelCase($"{method} {path}");
 
+		// Avoid conflicts with existing members (methods or DTOs) by appending "Method" if needed
+		while (members.Any(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+			name += "Method";
+
 		var httpAttributeValues = new List<ServiceAttributeParameterInfo>
 		{
 			new ServiceAttributeParameterInfo("method", method),
@@ -174,8 +190,20 @@ internal sealed class SwaggerConversion
 		};
 
 		var requestFields = new List<ServiceFieldInfo>();
-		foreach (var swaggerParameter in swaggerOperationsParameters.EmptyIfNull().Concat(swaggerOperation.Parameters.EmptyIfNull()))
+
+		// Deduplicate parameters: operation-level parameters override path-level parameters
+		var allParameters = swaggerOperationsParameters.EmptyIfNull().Concat(swaggerOperation.Parameters.EmptyIfNull()).ToList();
+		var deduplicatedParameters = allParameters
+			.GroupBy(p => new { Name = p.Name, In = p.In })
+			.Select(g => g.Last()) // Last wins (operation parameters come after path parameters in concat)
+			.ToList();
+		foreach (var swaggerParameter in deduplicatedParameters)
 			AddRequestFields(requestFields, ResolveParameter(swaggerParameter, part?.Position), name!, method, part);
+
+		// Deduplicate request fields by name (body schema fields might conflict with parameters)
+		requestFields = [.. requestFields
+			.GroupBy(f => f.Name)
+			.Select(g => g.First())]; // First wins (parameters come before body fields)
 
 		var responseFields = new List<ServiceFieldInfo>();
 		var swaggerResponsePairs = swaggerOperation.Responses.EmptyIfNull()
@@ -186,7 +214,13 @@ internal sealed class SwaggerConversion
 				name!, httpAttributeValues, swaggerOperation.Responses!.Count == 1, part);
 		}
 
+		// Deduplicate response fields by name (multiple responses might have same field)
+		responseFields = [.. responseFields
+			.GroupBy(f => f.Name)
+			.Select(g => g.First())]; // First wins
+
 		var attributes = new List<ServiceAttributeInfo> { new ServiceAttributeInfo("http", httpAttributeValues) };
+
 		if (swaggerOperation.Deprecated.GetValueOrDefault())
 			attributes.Add(new ServiceAttributeInfo("obsolete"));
 		if (swaggerOperation.Tags != null)
@@ -261,7 +295,7 @@ internal sealed class SwaggerConversion
 			}
 			else
 			{
-				var typeName = bodySchema.Key ?? FilterBodyTypeName(TryGetFacilityTypeName(bodySchema.Value, part.Position));
+				var typeName = FilterBodyTypeName(TryGetFacilityTypeName(bodySchema.Value, part.Position));
 				if (typeName != null)
 				{
 					requestFields.Add(new ServiceFieldInfo(
@@ -285,18 +319,21 @@ internal sealed class SwaggerConversion
 		if (bodySchema.Value != null && (bodySchema.Value.Type ?? SwaggerSchemaType.Object) == SwaggerSchemaType.Object &&
 			(bodySchema.Key == null || bodySchema.Key.Equals(serviceMethodName + "Response", StringComparison.OrdinalIgnoreCase)))
 		{
-			httpAttributeValues.Add(new ServiceAttributeParameterInfo("code", statusCode, part!));
+			// Only add code if not already present (avoid duplicates when multiple responses are unwrapped)
+			if (!httpAttributeValues.Any(p => p.Name == "code"))
+				httpAttributeValues.Add(new ServiceAttributeParameterInfo("code", statusCode, part!));
 			AddFieldsFromSchema(responseFields, part!, bodySchema);
 		}
 		else if (swaggerResponse.Identifier == null && isOnlyResponse && swaggerResponse.Schema == null)
 		{
-			httpAttributeValues.Add(new ServiceAttributeParameterInfo("code", statusCode, part!));
+			if (!httpAttributeValues.Any(p => p.Name == "code"))
+				httpAttributeValues.Add(new ServiceAttributeParameterInfo("code", statusCode, part!));
 		}
 		else
 		{
 			responseFields.Add(new ServiceFieldInfo(
 				swaggerResponse.Identifier ?? (bodySchema.Key == null ? null : CodeGenUtility.ToCamelCase(bodySchema.Key)) ?? GetBodyFieldNameForStatusCode(statusCode),
-				typeName: bodySchema.Key ?? (bodySchema.Value != null ? FilterBodyTypeName(TryGetFacilityTypeName(bodySchema.Value, part!.Position)) : null) ?? "boolean",
+				typeName: (bodySchema.Value != null ? FilterBodyTypeName(TryGetFacilityTypeName(bodySchema.Value, part!.Position)) : null) ?? "boolean",
 				attributes:
 				[
 					new ServiceAttributeInfo("http",
@@ -355,10 +392,16 @@ internal sealed class SwaggerConversion
 
 	private string GetDefinitionNameFromRef(string refValue, ServiceDefinitionPosition? position)
 	{
-		const string refPrefix = "#/definitions/";
-		if (!refValue.StartsWith(refPrefix, StringComparison.Ordinal))
-			m_errors.Add(new ServiceDefinitionError("Definition $ref must start with '#/definitions/'.", position));
-		return UnescapeRefPart(refValue.Substring(refPrefix.Length));
+		const string definitionsPrefix = "#/definitions/";
+		const string componentsPrefix = "#/components/schemas/";
+
+		if (refValue.StartsWith(definitionsPrefix, StringComparison.Ordinal))
+			return UnescapeRefPart(refValue.Substring(definitionsPrefix.Length));
+		else if (refValue.StartsWith(componentsPrefix, StringComparison.Ordinal))
+			return UnescapeRefPart(refValue.Substring(componentsPrefix.Length));
+
+		m_errors.Add(new ServiceDefinitionError($"Definition $ref must start with '{definitionsPrefix}' or '{componentsPrefix}'.", position));
+		return UnescapeRefPart(refValue);
 	}
 
 	private KeyValuePair<string, SwaggerSchema> ResolveDefinition(SwaggerSchema swaggerDefinition, ServiceDefinitionPosition? position)
@@ -469,15 +512,20 @@ internal sealed class SwaggerConversion
 							return aliasType;
 						}
 
+						// Handle array type schemas (e.g., EmailTemplatesCollection: type array)
+						if (resolvedType == SwaggerSchemaType.Array)
+						{
+							return TryGetFacilityTypeName(resolvedSchema.Value, position);
+						}
 						var resultOfType = TryGetFacilityResultOfType(resolvedSchema, position);
 						if (resultOfType != null)
 							return $"result<{resultOfType}>";
 
-						return resolvedSchema.Key;
+						return SanitizeName(resolvedSchema.Key);
 					}
 
-					if (fullSchema.AdditionalProperties != null)
-						return $"map<{TryGetFacilityTypeName(fullSchema.AdditionalProperties, position)}>";
+					if (fullSchema.AdditionalProperties is SwaggerSchema additionalPropertiesSchema)
+						return $"map<{TryGetFacilityTypeName(additionalPropertiesSchema, position)}>";
 				}
 
 				return "object";
@@ -517,6 +565,22 @@ internal sealed class SwaggerConversion
 
 	private static string UnescapeRefPart(string value) => value.ReplaceOrdinal("~1", "/").ReplaceOrdinal("~0", "~");
 
+	private static string SanitizeName(string name)
+	{
+		// Convert names with hyphens or other invalid characters to valid identifiers
+		if (!ServiceDefinitionUtility.IsValidName(name))
+			name = CodeGenUtility.ToPascalCase(name);
+
+		// If name still invalid (e.g., starts with digit), prefix it
+		if (!ServiceDefinitionUtility.IsValidName(name))
+		{
+			// Names starting with digits need a prefix
+			if (name.Length > 0 && char.IsDigit(name[0]))
+				name = "N" + name;
+		}
+
+		return name;
+	}
 	private static readonly Regex s_pathParameter = new Regex(@"\{[^}]+\}");
 
 	private readonly SwaggerService m_swaggerService;

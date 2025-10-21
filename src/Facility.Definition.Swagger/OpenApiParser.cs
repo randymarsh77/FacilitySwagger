@@ -8,9 +8,9 @@ using YamlDotNet.Serialization;
 namespace Facility.Definition.Swagger;
 
 /// <summary>
-/// Parses Swagger (OpenAPI) 2.0.
+/// Parses OpenAPI 3.0.
 /// </summary>
-public sealed class SwaggerParser : ServiceParser
+public sealed class OpenApiParser : ServiceParser
 {
 	/// <summary>
 	/// The service name (defaults to 'info/x-identifier' or 'info/title').
@@ -26,13 +26,6 @@ public sealed class SwaggerParser : ServiceParser
 		if (isFsd || text.Name.EndsWith(".fsd", StringComparison.OrdinalIgnoreCase))
 			return isFsd;
 
-		// Check if this is OpenAPI 3.x
-		if (DetectOpenApiVersion(text.Text) == 3)
-		{
-			var openApiParser = new OpenApiParser { ServiceName = ServiceName };
-			return openApiParser.TryParseDefinition(text, out service, out errors);
-		}
-
 		service = null;
 
 		if (string.IsNullOrWhiteSpace(text.Text))
@@ -41,21 +34,30 @@ public sealed class SwaggerParser : ServiceParser
 			return false;
 		}
 
-		SwaggerService swaggerService;
+		// Normalize YAML: replace empty flow-style mappings with null to avoid deserialization issues
+		// Use regex to handle indentation
+		var normalizedText = Regex.Replace(
+			text.Text,
+			@"(\s+)properties:\s*\{\s*\}",
+			"$1properties:",
+			RegexOptions.Multiline);
+
+		OpenApiDocument openApiDocument;
 		SwaggerParserContext context;
 
-		if (!s_detectJsonRegex.IsMatch(text.Text))
+		if (!s_detectJsonRegex.IsMatch(normalizedText))
 		{
 			// parse YAML
 			var yamlDeserializer = new DeserializerBuilder()
 				.IgnoreUnmatchedProperties()
 				.WithNamingConvention(new OurNamingConvention())
+				.WithTypeConverter(new JTokenYamlConverter())
 				.Build();
-			using (var stringReader = new StringReader(text.Text))
+			using (var stringReader = new StringReader(normalizedText))
 			{
 				try
 				{
-					swaggerService = yamlDeserializer.Deserialize<SwaggerService>(stringReader);
+					openApiDocument = yamlDeserializer.Deserialize<OpenApiDocument>(stringReader);
 				}
 				catch (YamlException exception)
 				{
@@ -70,7 +72,7 @@ public sealed class SwaggerParser : ServiceParser
 				}
 			}
 
-			if (swaggerService == null)
+			if (openApiDocument == null)
 			{
 				errors = [new ServiceDefinitionError("Service definition is missing.", new ServiceDefinitionPosition(text.Name, 1, 1))];
 				return false;
@@ -86,7 +88,7 @@ public sealed class SwaggerParser : ServiceParser
 			{
 				try
 				{
-					swaggerService = JsonSerializer.Create(SwaggerUtility.JsonSerializerSettings).Deserialize<SwaggerService>(jsonTextReader)!;
+					openApiDocument = JsonSerializer.Create(OpenApiUtility.JsonSerializerSettings).Deserialize<OpenApiDocument>(jsonTextReader)!;
 				}
 				catch (JsonException exception)
 				{
@@ -98,53 +100,33 @@ public sealed class SwaggerParser : ServiceParser
 			}
 		}
 
-		var conversion = SwaggerConversion.Create(swaggerService, ServiceName, context);
+		var conversion = OpenApiConversion.Create(openApiDocument, ServiceName, context);
 		service = conversion.Service;
 		errors = conversion.Errors;
 		return errors.Count == 0;
 	}
 
 	/// <summary>
-	/// Converts Swagger (OpenAPI) 2.0 into a service definition.
+	/// Converts OpenAPI 3.0 into a service definition.
 	/// </summary>
 	/// <exception cref="ServiceDefinitionException">Thrown if the service would be invalid.</exception>
-	public ServiceInfo ConvertSwaggerService(SwaggerService swaggerService)
+	public ServiceInfo ConvertOpenApiDocument(OpenApiDocument openApiDocument)
 	{
-		if (TryConvertSwaggerService(swaggerService, out var service, out var errors))
+		if (TryConvertOpenApiDocument(openApiDocument, out var service, out var errors))
 			return service!;
 		else
 			throw new ServiceDefinitionException(errors);
 	}
 
 	/// <summary>
-	/// Attempts to convert Swagger (OpenAPI) 2.0 into a service definition.
+	/// Attempts to convert OpenAPI 3.0 into a service definition.
 	/// </summary>
-	public bool TryConvertSwaggerService(SwaggerService swaggerService, out ServiceInfo? service, out IReadOnlyList<ServiceDefinitionError> errors)
+	public bool TryConvertOpenApiDocument(OpenApiDocument openApiDocument, out ServiceInfo? service, out IReadOnlyList<ServiceDefinitionError> errors)
 	{
-		var conversion = SwaggerConversion.Create(swaggerService, ServiceName, SwaggerParserContext.None);
+		var conversion = OpenApiConversion.Create(openApiDocument, ServiceName, SwaggerParserContext.None);
 		service = conversion.Service;
 		errors = conversion.Errors;
 		return errors.Count == 0;
-	}
-
-	/// <summary>
-	/// Detects the OpenAPI/Swagger version from the document text.
-	/// </summary>
-	/// <returns>2 for Swagger 2.0, 3 for OpenAPI 3.x, or 0 if unknown</returns>
-	private static int DetectOpenApiVersion(string text)
-	{
-		if (string.IsNullOrWhiteSpace(text))
-			return 0;
-
-		// Look for "openapi: 3" (YAML) or "\"openapi\": \"3" (JSON)
-		if (Regex.IsMatch(text, @"\bopenapi\s*:\s*[""']?3\.", RegexOptions.IgnoreCase))
-			return 3;
-
-		// Look for "swagger: 2" (YAML) or "\"swagger\": \"2" (JSON)
-		if (Regex.IsMatch(text, @"\bswagger\s*:\s*[""']?2\.", RegexOptions.IgnoreCase))
-			return 2;
-
-		return 0;
 	}
 
 	private sealed class OurNamingConvention : INamingConvention

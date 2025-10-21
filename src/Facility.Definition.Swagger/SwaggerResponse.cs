@@ -18,6 +18,11 @@ public class SwaggerResponse
 
 	public JObject? Examples { get; set; }
 
+	/// <summary>
+	/// OpenAPI 3.0: A map containing descriptions of potential response payloads.
+	/// </summary>
+	public IDictionary<string, OpenApiMediaType>? Content { get; set; }
+
 	[JsonProperty("x-identifier")]
 	[YamlMember(Alias = "x-identifier")]
 	public string? Identifier { get; set; }

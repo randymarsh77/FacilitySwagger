@@ -1,0 +1,190 @@
+using FluentAssertions;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using NUnit.Framework;
+using YamlDotNet.Serialization;
+
+namespace Facility.Definition.Swagger.UnitTests;
+
+[TestFixture]
+public class OpenApiTests
+{
+	[Test]
+	public void GenerateSimpleServiceOpenApi3()
+	{
+		var service = new OpenApiParser().ConvertOpenApiDocument(s_openApiDocument);
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(1);
+	}
+
+	[Test]
+	public void GenerateSimpleServiceOpenApi3Json()
+	{
+		var generator = new OpenApiGenerator { GeneratesJson = true, GeneratorName = "tests" };
+		var fsdService = TestUtility.ParseTestApi(c_fsdText);
+		var file = generator.GenerateOutput(fsdService).Files.Single();
+		file.Name.Should().Be("TestApi.json");
+		var jToken = JToken.Parse(file.Text);
+		var jTokenExpected = JToken.FromObject(s_openApiDocument, JsonSerializer.Create(OpenApiUtility.JsonSerializerSettings));
+		JToken.DeepEquals(jToken, jTokenExpected).Should().BeTrue("{0} should be {1}", jToken, jTokenExpected);
+
+		var service = new OpenApiParser().ParseDefinition(new ServiceDefinitionText(name: file.Name, text: file.Text));
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(fsdService.Methods.Count);
+
+		service = new OpenApiParser().ConvertOpenApiDocument(s_openApiDocument);
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(fsdService.Methods.Count);
+	}
+
+	[Test]
+	public void GenerateSimpleServiceOpenApi3Yaml()
+	{
+		var generator = new OpenApiGenerator { GeneratesJson = false, GeneratorName = "tests" };
+		var fsdService = TestUtility.ParseTestApi(c_fsdText);
+		var file = generator.GenerateOutput(fsdService).Files.Single();
+		file.Name.Should().Be("TestApi.yaml");
+		var jToken = JToken.FromObject(new DeserializerBuilder().Build().Deserialize(new StringReader(file.Text))!);
+		var jTokenExpected = JToken.FromObject(s_openApiDocument, JsonSerializer.Create(OpenApiUtility.JsonSerializerSettings));
+		JToken.DeepEquals(jToken, jTokenExpected).Should().BeTrue("{0} should be {1}", jToken, jTokenExpected);
+
+		var service = new OpenApiParser().ParseDefinition(new ServiceDefinitionText(name: file.Name, text: file.Text));
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(fsdService.Methods.Count);
+	}
+
+	[Test]
+	public void ParseOpenApi3DetectedBySwaggerParser()
+	{
+		const string yaml = @"
+openapi: 3.0.0
+info:
+  title: TestApi
+  version: 1.0.0
+paths:
+  /test:
+    get:
+      operationId: test
+      responses:
+        '200':
+          description: Success
+";
+		var service = new SwaggerParser().ParseDefinition(new ServiceDefinitionText(name: "test.yaml", text: yaml));
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(1);
+		service.Methods[0].Name.Should().Be("test");
+	}
+
+	[Test]
+	public void ParseOpenApi3WithSchemaReferences()
+	{
+		const string yaml = @"
+openapi: 3.0.0
+info:
+  title: TestApi
+  version: 1.0.0
+paths:
+  /test:
+    post:
+      operationId: createTest
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateResponse'
+components:
+  schemas:
+    CreateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          $ref: '#/components/schemas/ValueType'
+    CreateResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+    ValueType:
+      type: string
+";
+		var service = new SwaggerParser().ParseDefinition(new ServiceDefinitionText(name: "test.yaml", text: yaml));
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(1);
+		service.Methods[0].Name.Should().Be("createTest");
+	}
+
+	[Test]
+	public void ParseOpenApi3WithEmptyProperties()
+	{
+		const string yaml = @"
+openapi: 3.0.0
+info:
+  title: TestApi
+  version: 1.0.0
+paths:
+  /test:
+    get:
+      operationId: test
+      responses:
+        '200':
+          description: Success
+components:
+  schemas:
+    TestSchema:
+      type: object
+      properties: { }
+      additionalProperties: true
+";
+		var service = new SwaggerParser().ParseDefinition(new ServiceDefinitionText(name: "test.yaml", text: yaml));
+		service.Summary.Should().Be("TestApi");
+		service.Methods.Count.Should().Be(1);
+	}
+
+	private const string c_fsdText = @"
+			service TestApi
+			{
+				method do
+				{
+				}:
+				{
+				}
+			}";
+
+	private static readonly OpenApiDocument s_openApiDocument = new OpenApiDocument
+	{
+		OpenApi = "3.0.0",
+		Info = new SwaggerInfo
+		{
+			Identifier = "TestApi",
+			Title = "TestApi",
+			Version = "0.0.0",
+			CodeGen = "DO NOT EDIT: generated by tests",
+		},
+		Paths = new Dictionary<string, SwaggerOperations>
+		{
+			["/do"] = new SwaggerOperations
+			{
+				Post = new SwaggerOperation
+				{
+					OperationId = "do",
+					Responses = new Dictionary<string, SwaggerResponse>
+					{
+						["200"] = new SwaggerResponse
+						{
+							Description = "",
+						},
+					},
+				},
+			},
+		},
+	};
+}

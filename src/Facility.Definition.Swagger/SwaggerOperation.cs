@@ -18,6 +18,11 @@ public class SwaggerOperation
 
 	public IList<SwaggerParameter>? Parameters { get; set; }
 
+	/// <summary>
+	/// OpenAPI 3.0: The request body applicable for this operation.
+	/// </summary>
+	public OpenApiRequestBody? RequestBody { get; set; }
+
 	public IDictionary<string, SwaggerResponse>? Responses { get; set; }
 
 	public IList<string>? Schemes { get; set; }

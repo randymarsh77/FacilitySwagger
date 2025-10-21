@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
-    <Description>Used to interpret Swagger (OpenAPI) 2.0 definitions.</Description>
+    <Description>Used to interpret Swagger (OpenAPI) 2.0 and OpenAPI 3.0 definitions.</Description>
     <PackageTags>Facility FSD Swagger OpenAPI Definition</PackageTags>
     <IsPackable>true</IsPackable>
     <PackageReadmeFile>README.md</PackageReadmeFile>
